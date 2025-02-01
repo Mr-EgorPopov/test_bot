@@ -13,6 +13,10 @@ from tkinter import scrolledtext
 from tkinter import simpledialog
 import numpy as np
 import ctypes
+import win32gui
+import win32api
+import win32ui
+import win32con
 
 # Настройка пути к Tesseract OCR (измените, если необходимо)
 pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
@@ -45,21 +49,73 @@ TELEGRAM_CHAT_ID = '5268693450'  # Замените на ID вашего чат�
 # Погрешность для сравнения ников
 tolerance = 10
 stop_event = threading.Event()  # событие для остановки
+read
+# Нахождение окна по заголовку
+def find_window(title):
+    hwnd = 197720
+    if hwnd == 0:
+        raise Exception(f"Окно с заголовком '{title}' не найдено.")
+    return hwnd
 
-def take_screenshot(x1, y1, x2, y2, filename):
+# Эмуляция нажатия клавиш
+def send_key_to_window(hwnd, key):
+    win32api.PostMessage(hwnd, win32con.WM_KEYDOWN, ord(key), 0)
+    time.sleep(0.1)
+    win32api.PostMessage(hwnd, win32con.WM_KEYUP, ord(key), 0)
+
+# Эмуляция кликов мыши
+def click_in_window(hwnd, x, y, button='left'):
+    rect = win32gui.GetWindowRect(hwnd)
+    window_x, window_y = rect[0], rect[1]
+    client_x = x + window_x
+    client_y = y + window_y
+    lParam = win32api.MAKELONG(client_x, client_y)
+    if button == 'left':
+        win32api.PostMessage(hwnd, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, lParam)
+        time.sleep(0.1)
+        win32api.PostMessage(hwnd, win32con.WM_LBUTTONUP, 0, lParam)
+
+def take_screenshot(hwnd, x, y, width, height, filename):
+    global Image
     """
-    Делает скриншот заданной области экрана и сохраняет его в файл.
-    Args:
-        x1 (int): X-координата левого верхнего угла.
-        y1 (int): Y-координата левого верхнего угла.
-        x2 (int): X-координата правого нижнего угла.
-        y2 (int): Y-координата правого нижнего угла.
-        filename (str): Имя файла для сохранения скриншота.
-    Returns:
-        str: Имя файла, в который был сохранен скриншот.
+    Создает скриншот указанной области в свернутом окне по координатам.
+    
+    :param hwnd: Дескриптор окна (HWND).
+    :param x: Координата X верхнего левого угла области для скриншота.
+    :param y: Координата Y верхнего левого угла области для скриншота.
+    :param width: Ширина области для скриншота.
+    :param height: Высота области для скриншота.
+    :return: Объект PIL.Image с изображением.
     """
-    screenshot = pyautogui.screenshot(region=(x1, y1, x2 - x1, y2 - y1))
-    screenshot.save(filename)
+    # Получаем Device Context (DC) окна
+    window_dc = win32gui.GetWindowDC(hwnd)
+    mem_dc = win32ui.CreateDCFromHandle(window_dc)
+    compatible_dc = mem_dc.CreateCompatibleDC()
+
+    # Создаем bitmap для хранения скриншота
+    bitmap = win32ui.CreateBitmap()
+    bitmap.CreateCompatibleBitmap(mem_dc, width, height)
+    compatible_dc.SelectObject(bitmap)
+
+    # Копируем содержимое окна в bitmap
+    compatible_dc.BitBlt((0, 0), (width, height), mem_dc, (x, y), win32con.SRCCOPY)
+
+    # Преобразуем bitmap в массив байтов
+    bmpinfo = bitmap.GetInfo()
+    bmpstr = bitmap.GetBitmapBits(True)
+
+    # Создаем объект PIL.Image
+    filename = Image.frombuffer(
+        'RGB',
+        (bmpinfo['bmWidth'], bmpinfo['bmHeight']),
+        bmpstr, 'raw', 'BGRX', 0, 1
+    )
+    # Освобождаем ресурсы
+    win32gui.DeleteObject(bitmap.GetHandle())
+    compatible_dc.DeleteDC()
+    mem_dc.DeleteDC()
+    win32gui.ReleaseDC(hwnd, window_dc)
+
     return filename
 
 def recognize_sum():
@@ -141,46 +197,37 @@ def recognize_balance(image):
         print(f"Ошибка распознавания текста: {e}")
         return 0
 
-def click(x, y):
-    """
-    Выполняет одиночный клик мышью по заданным координатам.
-    Args:
-        x (int): X-координата клика.
-        y (int): Y-координата клика.
-    """
-    pyautogui.moveTo(x, y, duration=0.1)
-    time.sleep(delay_before_click)
-    pyautogui.mouseDown()
-    time.sleep(delay_mouse)
-    pyautogui.mouseUp()
-    time.sleep(delay_after_click)
+def click(hwnd, x, y, button='left'):
+    rect = win32gui.GetWindowRect(hwnd)
+    window_x, window_y = rect[0], rect[1]
+    client_x = x + window_x
+    client_y = y + window_y
+    lParam = win32api.MAKELONG(client_x, client_y)
+    if button == 'left':
+        win32api.PostMessage(hwnd, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, lParam)
+        time.sleep(0.1)
+        win32api.PostMessage(hwnd, win32con.WM_LBUTTONUP, 0, lParam)
 
-def double_click(x, y):
-    """
-    Выполняет двойной клик мышью по заданным координатам.
-    Args:
-        x (int): X-координата клика.
-        y (int): Y-координата клика.
-    """
-    pyautogui.moveTo(x, y, duration=0.1)
-    time.sleep(delay_before_click)
-    pyautogui.mouseDown(button='left')
-    time.sleep(delay_mouse)
-    pyautogui.mouseUp(button='left')
-    time.sleep(delay_mouse)
-    pyautogui.mouseDown(button='left')
-    time.sleep(delay_mouse)
-    pyautogui.mouseUp(button='left')
-    time.sleep(delay_after_click)
+def double_click(hwnd, x, y, button='left'):
+    rect = win32gui.GetWindowRect(hwnd)
+    window_x, window_y = rect[0], rect[1]
+    client_x = x + window_x
+    client_y = y + window_y
+    lParam = win32api.MAKELONG(client_x, client_y)
+    if button == 'left':
+        win32api.PostMessage(hwnd, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, lParam)
+        time.sleep(0.1)
+        win32api.PostMessage(hwnd, win32con.WM_LBUTTONUP, 0, lParam)
+        time.sleep(0.1)
+        win32api.PostMessage(hwnd, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, lParam)
+        time.sleep(0.1)
+        win32api.PostMessage(hwnd, win32con.WM_LBUTTONUP, 0, lParam)
+        time.sleep(0.1)
 
-def type_text(text):
-    """
-    Вводит текст с клавиатуры.
-    Args:
-        text (str): Текст для ввода.
-    """
-    pyautogui.write(str(text))
-    time.sleep(delay_before_click)
+def type_text(hwnd, text):
+    for char in text:
+        send_key_to_window(hwnd, char)
+        time.sleep(0.1)
 
 def check_balance_and_notify(added_sum):
     """
@@ -189,7 +236,7 @@ def check_balance_and_notify(added_sum):
         bool: True если прибыль недостаточна, и нужно отправлять уведомление, False если достаточно.
     """
     try:
-        screenshot4_path = take_screenshot(screen_balance[0], screen_balance[1], screen_balance[2], screen_balance[3],
+        screenshot4_path = take_screenshot(hwnd, screen_balance[0], screen_balance[1], 135, 27,
                                            "balance.png")
         sum2 = recognize_sum_balance(Image.open(screenshot4_path))
         print(f"Остаток адены: {sum2}")
@@ -221,6 +268,29 @@ def load_stop_sum():
             stop_sum = int(stop_sum_input)
             print(f"Используется значение stop_sum: {stop_sum}")
             break
+        except ValueError:
+            print("Некорректный ввод. Пожалуйста, введите целое число.")
+
+def load_wait_duration():
+    """ Запрашивает у пользователя значение wait_duration через консоль. """
+    global wait_duration
+    while True:
+        wait_duration_input = input("Введите 1 для фиксированной задержки (70 сек)\nВведите 2 для случайной задержки (70-180 сек): ")
+        if wait_duration_input.strip() == "":
+            print("Значение wait_duration не может быть пустым. Пожалуйста, введите значение.")
+            continue
+        try:
+            wait_duration_choice = int(wait_duration_input)
+            if wait_duration_choice == 1:
+                wait_duration = 70
+                print(f"Используется фиксированная задержка: {wait_duration} сек")
+                break
+            elif wait_duration_choice == 2:
+                wait_duration = random.randint(70, 180)
+                print(f"Используется случайная задержка: {wait_duration} сек")
+                break
+            else:
+                print("Некорректный ввод. Пожалуйста, введите 1 или 2.")
         except ValueError:
             print("Некорректный ввод. Пожалуйста, введите целое число.")
 
@@ -284,7 +354,7 @@ def process_actions():
     first_screenshot = None
     added_sum = 0
     sum1 = 0  # инициализируем sum1
-    screenshot5_path = take_screenshot(screen_price[0], screen_price[1], screen_price[2], screen_price[3],
+    screenshot5_path = take_screenshot(hwnd, screen_price[0], screen_price[1], 173, 32,
                                        "price_enemy.png")  # Создаем скриншот цены конкурента
     Image.open(screenshot5_path).save('price.png')  # Сохраняем скриншот
     sum16 = recognize_sum()  # Распознаем сумму
@@ -292,8 +362,8 @@ def process_actions():
     while not stop_event.is_set():
         if not first_screenshot_taken:
             try:
-                screenshot1_path = take_screenshot(screen_nickname[0], screen_nickname[1], screen_nickname[2],
-                                                   screen_nickname[3],
+                screenshot1_path = take_screenshot(hwnd, screen_nickname[0], screen_nickname[1], 95,
+                                                   20,
                                                    "nickname.png")  # Создаем скриншот ника и сохраняем
                 first_screenshot = Image.open(screenshot1_path)  # Открываем скриншот
                 first_screenshot_taken = True  # Указываем, что первый скриншот был сделан
@@ -307,21 +377,19 @@ def process_actions():
             # 2-7 Пункты.
             if check_balance_and_notify(added_sum):  # если баланс мал, то завершаем работу
                 break  # Выходим из цикла
-            click(click_update[0], click_update[1])  # Кликаем на "Обновить"
+            click(hwnd, click_update[0], click_update[1], button='left')  # Кликаем на "Обновить"
             time.sleep(1)  # Ожидание 1 сек
-            click(click_column[0], click_column[1])  # Кликаем на колонку
+            click(hwnd, click_column[0], click_column[1], button='left')  # Кликаем на колонку
             time.sleep(0.4)  # Ожидание 0.4 сек
-            click(click_column[0], click_column[1])  # Кликаем на колонку еще раз
+            click(hwnd, click_column[0], click_column[1], button='left')  # Кликаем на колонку еще раз
             time.sleep(0.4)  # Ожидание 0.4 сек
             step += 1  # Увеличиваем шаг на 1
             time.sleep(0.1)  # Короткая задержка
         elif step == 2:
             # 8. скрин и сравнение.
-            screenshot2_path = take_screenshot(screen_nickname[0],
-                                               screen_nickname[1],
-                                               screen_nickname[2],
-                                               screen_nickname[3],
-                                               "nickname.png")  # Создаем скриншот ника
+            screenshot2_path = take_screenshot(hwnd, screen_nickname[0], screen_nickname[1], 95,
+                                                   20,
+                                                   "nickname.png")  # Создаем скриншот ника
             try:
                 img2 = Image.open(screenshot2_path)  # Открываем скриншот ника
                 if compare_screenshots(first_screenshot, img2, tolerance):  # Если ники не отличаются, то пропускаем и идем в конец
@@ -332,8 +400,8 @@ def process_actions():
             step += 1  # Увеличиваем шаг на 1
             time.sleep(0.1)  # Короткая задержка
         elif step == 3:
-            screenshot3_path = take_screenshot(screen_price[0], screen_price[1], screen_price[2],
-                                               screen_price[3],
+            screenshot3_path = take_screenshot(hwnd, screen_price[0], screen_price[1], 173,
+                                               32,
                                                "cenapricecurenta.png")  # Создаем скриншот цены
             Image.open(screenshot3_path).save('price.png')  # Сохраняем скриншот
             sum1 = recognize_sum()  # Считываем сумму
@@ -352,7 +420,6 @@ def process_actions():
                 except Exception as e:
                     print(f"Ошибка при отправке сообщения Telegram: {e}")
                 wait_time = 0
-                wait_duration = random.randint(70, 180)
                 print(f"Ожидание {wait_duration} секунд...")
                 while wait_time < wait_duration and not stop_event.is_set():  # check if stop
                     time.sleep(1)
@@ -363,39 +430,38 @@ def process_actions():
                 continue
             print("Фиксим.")
             # Вторая ветка
-            click(click_redact[0], click_redact[1])  # Кликаем на редактировать
+            click(hwnd, click_redact[0], click_redact[1], button='left')  # Кликаем на редактировать
             time.sleep(2)  # Ожидание 2 сек
-            double_click(dclick_coin[0], dclick_coin[1])  # Двойной клик по монете
+            double_click(hwnd, dclick_coin[0], dclick_coin[1], button='left')  # Двойной клик по монете
             time.sleep(1.5)  # Ожидание 1.5 сек
-            click(click_all[0], click_all[1])  # Кликаем на "Все"
+            click(hwnd, click_all[0], click_all[1], button='left')  # Кликаем на "Все"
             time.sleep(0.8)  # Ожидание 0.8 сек
-            pyautogui.press('enter')  # Нажимаем ентер
+            send_key_to_window(hwnd, win32con.VK_RETURN)  # Нажимаем ентер
             time.sleep(0.8)  # Ожидание 0.8 сек
-            double_click(dclick_mycoin[0], dclick_mycoin[1])  # Двойной клик по моему товару
+            double_click(hwnd, dclick_mycoin[0], dclick_mycoin[1], button='left')  # Двойной клик по моему товару
             time.sleep(1)  # Ожидание 1 сек
             step += 1  # Увеличиваем шаг на 1
             time.sleep(0.1)  # Короткая задержка
         elif step == 4:
-            type_text(added_sum)  # Печатаем цену
+            type_text(hwnd, added_sum)  # Печатаем цену
             time.sleep(0.5)  # Ожидание 0.5 сек
-            pyautogui.press('enter')  # Нажимаем ентер
+            send_key_to_window(hwnd, win32con.VK_RETURN)  # Нажимаем ентер
             step += 1  # Увеличиваем шаг на 1
             time.sleep(0.1)  # Короткая задержка
-            screenshot4_path = take_screenshot(screen_balance[0], screen_balance[1], screen_balance[2], screen_balance[3],
+            screenshot4_path = take_screenshot(hwnd, screen_balance[0], screen_balance[1], 135, 27,
                                            "bal.png")
             sum19 = recognize_sum_balance(Image.open(screenshot4_path))
             finally_volume = (sum19 // added_sum)
-            type_text(finally_volume)  # Печатаем цену
+            type_text(hwnd, finally_volume)  # Печатаем цену
             time.sleep(0.8)  # Ожидание 0.8 сек
-            pyautogui.press('enter')  # Нажимаем ентер
+            send_key_to_window(hwnd, win32con.VK_RETURN)  # Нажимаем ентер
             time.sleep(1.5)  # Ожидание 1.5 сек
             step += 1  # Увеличиваем шаг на 1
             time.sleep(0.1)  # Короткая задержка
         elif step == 6:
             # Пункт 15
-            click(click_start_sell[0], click_start_sell[1])  # Кликаем на "Начать продажу"
+            click(hwnd, click_start_sell[0], click_start_sell[1], button='left')  # Кликаем на "Начать продажу"
             wait_time = 0
-            wait_duration = random.randint(70, 180)
             print(f"Ожидание {wait_duration} секунд...")
             while wait_time < wait_duration and not stop_event.is_set():
                 time.sleep(1)
@@ -406,13 +472,13 @@ def process_actions():
             continue  # Идем в начало
         elif step == 7:
             # Если большая разница в цене с конкурентом
-            screenshot4_path = take_screenshot(screen_enemy[0], screen_enemy[1], screen_enemy[2],
-                                               screen_enemy[3],
+            screenshot4_path = take_screenshot(hwnd, screen_enemy[0], screen_enemy[1], 151,
+                                               34,
                                                "price_nick.png")  # Создаем скриншот ника продавца
             Image.open(screenshot4_path).save('price.png')  # Сохраняем скриншот
             sum12 = recognize_sum()  # Распознаем сумму
-            screenshot5_path = take_screenshot(screen_price[0], screen_price[1], screen_price[2],
-                                               screen_price[3],
+            screenshot5_path = take_screenshot(hwnd, screen_price[0], screen_price[1], 173,
+                                               32,
                                                "price_enemy.png")  # Создаем скриншот цены конкурента
             Image.open(screenshot5_path).save('price.png')  # Сохраняем скриншот
             sum11 = recognize_sum()  # Распознаем сумму
@@ -432,7 +498,6 @@ def process_actions():
                     except Exception as e:
                         print(f"Ошибка при отправке сообщения Telegram: {e}")
                     wait_time = 0
-                    wait_duration = random.randint(70, 180)
                     print(f"Ожидание {wait_duration} секунд...")
                     while wait_time < wait_duration and not stop_event.is_set():
                         time.sleep(1)
@@ -443,34 +508,33 @@ def process_actions():
                     continue  # Идем в начало
                 print("Корректирую разницу с конкурентом")
                 # Вторая ветка
-                click(click_redact[0], click_redact[1])  # Кликаем на редактировать
+                click(hwnd, click_redact[0], click_redact[1], button='left')  # Кликаем на редактировать
                 time.sleep(2)  # Ждем 2 сек
-                double_click(dclick_coin[0], dclick_coin[1])  # Двойной клик на монету
+                double_click(hwnd, dclick_coin[0], dclick_coin[1], button='left')  # Двойной клик на монету
                 time.sleep(1.5)  # Ждем 1.5 сек
-                click(click_all[0], click_all[1])  # Кликаем на "Все"
+                click(hwnd, click_all[0], click_all[1], button='left')  # Кликаем на "Все"
                 time.sleep(0.8)  # Ждем 0.8 сек
-                pyautogui.press('enter')  # Нажимаем ентер
+                send_key_to_window(hwnd, win32con.VK_RETURN)  # Нажимаем ентер
                 time.sleep(0.8)  # Ждем 0.8 сек
-                double_click(dclick_mycoin[0], dclick_mycoin[1])  # Двойной клик на мой товар
+                double_click(hwnd, dclick_mycoin[0], dclick_mycoin[1], button='left')  # Двойной клик на мой товар
                 time.sleep(1)  # Ждем 1 сек
                 time.sleep(0.1)  # Короткая задержка
                 # Пункты 6-10
-                type_text(added_sum)  # Печатаем цену
+                type_text(hwnd, added_sum)  # Печатаем цену
                 time.sleep(0.5)  # Ждем 0.5 сек
-                pyautogui.press('enter')  # Нажимаем ентер
+                send_key_to_window(hwnd, win32con.VK_RETURN)  # Нажимаем ентер
                 time.sleep(0.1)  # Короткая задержка
-                screenshot4_path = take_screenshot(screen_balance[0], screen_balance[1], screen_balance[2], screen_balance[3],
+                screenshot4_path = take_screenshot(hwnd, screen_balance[0], screen_balance[1], 135, 27,
                                            "balance.png")
                 sum19 = recognize_sum_balance(Image.open(screenshot4_path))
                 finally_volume = (sum19 // added_sum)
-                type_text(finally_volume)  # Печатаем цену
+                type_text(hwnd, finally_volume)  # Печатаем цену
                 time.sleep(0.8)  # Ждем 0.8 сек
-                pyautogui.press('enter')  # Нажимаем ентер
+                send_key_to_window(hwnd, win32con.VK_RETURN)  # Нажимаем ентер
                 time.sleep(1.5)  # Ждем 1.5 сек
                 # Пункт 15
-                click(click_start_sell[0], click_start_sell[1])  # Кликаем на "Начать продажу"
+                click(hwnd, click_start_sell[0], click_start_sell[1], button='left')  # Кликаем на "Начать продажу"
                 wait_time = 0
-                wait_duration = random.randint(70, 180)
                 print(f"Ожидание {wait_duration} секунд...")
                 while wait_time < wait_duration and not stop_event.is_set():
                     time.sleep(1)
@@ -483,7 +547,6 @@ def process_actions():
                 print("Все ок.")
                 added_sum = sum11
                 wait_time = 0
-                wait_duration = random.randint(70, 180)
                 print(f"Ожидание {wait_duration} секунд...")
                 while wait_time < wait_duration and not stop_event.is_set():
                     time.sleep(1)
@@ -508,7 +571,10 @@ if __name__ == "__main__":
     root.withdraw()  # Сворачиваем окно при запуске
     try:
         while True:
+            hwnd = find_window("Lineage II")  # Замените на точное название окна
             load_stop_sum()  # Загружаем значение стоп суммы
+            # Запрос значения wait_duration
+            load_wait_duration()
             keyboard.add_hotkey('f9', lambda: stop_event.set())
             keyboard.wait('f10')  # ожидаем нажатие f10
             start_script()  # Запускаем скрипт
