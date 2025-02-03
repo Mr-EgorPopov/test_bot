@@ -1,544 +1,766 @@
-import pyautogui
-import time
-import random
-import pytesseract
-from PIL import Image
-import keyboard
-import re
-import threading
-import requests
-import tkinter as tk
-import numpy as np
+#include "gamethread.h"
 
+bool GameThread::enterWorld_ = false;
 
-# Настройка пути к Tesseract OCR (измените, если необходимо)
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+bool GameThread::enterWorld ()
+{
+	return enterWorld_;
+}
 
-# Координаты и задержки
-screen_pribul = (2225, 1527, 2322, 1545)
-screen_enemy = (1818, 353, 1969, 387)  # Скрин продавца -1
-screen_nickname = (2032, 302, 2127, 322)  # скрин ника
-click_update = (2273, 246)  # клик по "обновить"
-click_column = (1886, 277)  # клин по колонке
-click_redact = (221, 455)  # кнопка редактировать
-dclick_coin = (285, 188)  # даблклик по монете
-click_all = (439, 361)  # клик по ALL
-dclick_mycoin = (34, 186)  # даблклик по товару в рюкзаке
-screen_price = (1795, 298, 1968, 330)  # скрин самой "высокой" цены
-screen_balance = (605, 919, 740, 946)  # скрин баланса
-click_start_sell = (306, 493)  # клик по кнопке "начать продажу"
-screen_wait = (408, 413, 547, 429)  # скрин по кнопке "ожидаемая прибыль"
+GameThread::GameThread ()
+{
+	tradeUi_ = 0;
+}
 
-delay_before_click = 0.5   # Задержка перед кликом мышью
-delay_after_click = 0.5    # Задержка после клика мышью
-delay_mouse = 0.1        # Задержка между нажатием и отпусканием кнопки мыши
-stop_sum_file = "stop_sum.json"  # Имя файла для сохранения stop_sum (не используется в текущем коде)
-stop_sum = 0  # Переменная для хранения значения stop_sum
+GameThread::~GameThread ()
+{
+	delete teleportTimer_;
+	delete pSocket_;
+}
 
-# Настройки Telegram
-TELEGRAM_BOT_TOKEN = '7648784424:AAGKE_rBjYGngyLi8CXYq31ollrZzNUbVtw'  # Замените на токен вашего бота
-TELEGRAM_CHAT_ID = '5268693450'  # Замените на ID вашего чата
+void GameThread::run ()
+{
+	pSocket_ = new QTcpSocket;
+	teleportTimer_ = new QTimer;
+	connect (teleportTimer_, SIGNAL (timeout ()), SLOT (slotTeleportTimer ()));
+	connect (pSocket_, SIGNAL (readyRead ()), SLOT (slotReadyRead_ ()));
+	connect (pSocket_, SIGNAL (disconnected ()), SLOT (slotDisconnected_ ()));
+	connect (pSocket_, SIGNAL (connected ()), SLOT (slotConnected_ ()));
+	pSocket_->connectToHost (LoginData::ip.c_str (), LoginData::port);	
+	this->exec ();
+}
 
-# Погрешность для сравнения ников
-tolerance = 10
+void GameThread::slotDisconnected_ ()
+{
+	delete pSocket_;
+	this->quit ();
+}
 
-stop_event = threading.Event()  # событие для остановки
+void GameThread::slotReadyRead_ ()
+{
+	if (!bSize_ && pSocket_->bytesAvailable () >= 2)
+	{
+		QByteArray size = pSocket_->read (2);
+		bSize_ = static_cast <int> (static_cast <unsigned char> (size.at (0))) + static_cast <int> (static_cast <unsigned char> (size.at (1))) * 0x100 - 2;
+	}
+	if (bSize_ > 0 && pSocket_->bytesAvailable () >= bSize_)
+	{
+		QByteArray data = pSocket_->read (bSize_);
+		bSize_ = 0;
+		string pck;
+		for (int i = 0; i < data.size (); ++i)
+		{
+			pck += data.at (i);
+		}
+		if (init_)
+		{
+			pck = GameCrypt::decrypt (pck);
+		}
+		unsigned char packetId = static_cast <unsigned char> (pck[0]);
+		if (packetId == E_S_GAME_KEY)
+		{
+			GameCrypt::init (pck.substr (2, 8));
+			init_ = true;
+			write_ (GameCrypt::encrypt (GamePacket::authRequest (LoginData::login, LoginData::key2)));
+		}
+		else if (packetId == E_S_GAME_CHAR_SELECT)
+		{			
+			vector <CharSelectItem> chars;
+			GameF::charSelect (pck, &chars);
+			saveGameCharSelect_ = pck;
+			SelectCharDialog * ui = new SelectCharDialog (chars);
+			int selection = 0;
+			if (ui->exec () == QDialog::Accepted)
+			{
+				selection = ui->selection ();
+				delete ui;
+			}
+			else
+			{
+				pSocket_->close ();
+				delete ui;
+				return;
+			}
+			if (selection == -1)
+			{
+				write_ (GameCrypt::encrypt (GamePacket::newCharacter ()));
+			}
+			else
+			{
+				write_ (GameCrypt::encrypt (GamePacket::charSelected (selection)));
+			}
+		}
+		else if (packetId == E_S_GAME_QUEST_LIST)
+		{
+			if (!enterWorld_)
+			{			
+				QTimer * enterWorldTimer = new QTimer;
+				enterWorldTimer->setSingleShot (true);
+				connect (enterWorldTimer, SIGNAL (timeout ()), SLOT (slotEnterWorld_ ()));
+				enterWorldTimer->start (3000);
+			}
+		}
+		else if (packetId == E_S_GAME_NET_PING)
+		{
+			write_ (GameCrypt::encrypt (GamePacket::netPing (pck.substr (1, pck.length ()))));
+		}
+		else if (packetId == E_S_GAME_SSQ_INFO)
+		{
+			if (!enterWorld_)
+			{										
+				write_ (GameCrypt::encrypt (GamePacket::requestManorList ()));
+			}
+		}
+		else if (packetId == E_S_GAME_RCVD_MANOR_LIST)
+		{
+			if (!enterWorld_)
+			{				
+				write_ (GameCrypt::encrypt (GamePacket::requestQuestList ()));
+			}			
+		}
+		else if (packetId == E_S_GAME_NPCINFO)
+		{
+			emit signalCreateNpc (GameF::npcInfo (pck));
+		}
+		else if (packetId == E_S_GAME_CHARINFO)
+		{
+			emit signalCreateChar (GameF::charInfo (pck));
+		}
+		else if (packetId == E_S_GAME_USERINFO)
+		{
+			emit signalCreateUser (GameF::userInfo (pck));
+		}
+		else if (packetId == E_S_GAME_DELETE_OBJECT)
+		{
+			emit signalDeleteObject (GameF::deleteObject (pck));
+		}
+		else if (packetId == E_S_GAME_MOVE_TO_LOCATION)
+		{
+			int objId;
+			CatXPoint from;
+			CatXPoint to;
+			Debug::write (pck);
+			GameF::moveToLocation (pck, &objId, &from, &to);
+			MapScene::moveToLocation (objId, from, to);
+		}
+		else if (packetId == E_S_GAME_MOVE_TO_PAWN)
+		{
+			int objId;
+			int target;
+			int dist;
+			CatXPoint to;
+			Debug::write (pck);
+			GameF::moveToPawn (pck, &objId, &target, &to, &dist);
+			MapScene::moveToPawn (objId, target, to, dist);
+		}
+		else if (packetId == E_S_GAME_NPC_HTML_MESSAGE)
+		{
+			NpcHtmlMessage * ui = new NpcHtmlMessage (GameF::npcHtmlMessage (pck));
+			if (ui->exec () == QDialog::Accepted)
+			{
+				string result = ui->result ();
+				for (unsigned int i = 0; i < result.length (); ++i)
+				{
+					result[i] = tolower (result[i]);
+				}
+				if (result.substr (0, 4) == "link")
+				{
+					write_(GameCrypt::encrypt (GamePacket::requestLinkHtml (DataFunc::encodeTo (result.substr (5, result.length ())))));
+				}
+				else if (result.substr (0, 9) == "bypass -h")
+				{
+					write_(GameCrypt::encrypt (GamePacket::requestBypassToServer (DataFunc::encodeTo (result.substr (10, result.length ())))));
+				}
+				else if (result.substr (0, 6) == "bypass")
+				{
+					write_(GameCrypt::encrypt (GamePacket::requestBypassToServer (DataFunc::encodeTo (result.substr (7, result.length ())))));					
+				}
+			}
+			delete ui;
+		}
+		else if (packetId == E_S_GAME_STOP_MOVE)
+		{
+			CatXPoint pos;
+			int objectId;
+			GameF::stopMove (pck, &objectId, &pos);
+			MapScene::stopMove (objectId, pos);
+		}
+		else if (packetId == E_S_GAME_ACTION_FAIL)
+		{
+			MapScene::actionFail ();
+		}
+		else if (packetId == E_S_GAME_PRIVATE_STORE_MANAGE_LIST)
+		{
+			int playerObjId;
+			int packSell;
+			int adena;
+			vector <SellItem> items;
+			GameF::privateStoreManageList (pck, &playerObjId, &packSell, &adena, &items);
+			PrivateStoreManageList * ui = new PrivateStoreManageList (packSell, adena, items);
+			if (ui->exec () == QDialog::Accepted)
+			{
+				if (ui->packet ().length ())
+				{
+					if (Data::sellWidget ()->motd ().length ())
+					{
+						write_ (GameCrypt::encrypt (GamePacket::setPrivateStoreMsg (DataFunc::encodeTo (Data::sellWidget ()->motd ()))));
+					}
+					write_ (GameCrypt::encrypt (GamePacket::setPrivateStoreListSell (ui->packet ())));
+				}
+				else
+				{
+					write_ (GameCrypt::encrypt (GamePacket::requestPrivateStoreQuit ()));
+				}
+			}
+			else
+			{
+				write_ (GameCrypt::encrypt (GamePacket::requestPrivateStoreQuit ()));
+			}
+		}
+		else if (packetId == E_S_GAME_PRIVATE_STORE_BUY_MANAGE_LIST)
+		{
+			int playerObjId;
+			int adena;
+			vector <BuyItem> items;
+			GameF::privateStoreBuyManageList (pck, &playerObjId, &adena, &items);
+			PrivateStoreManageBuyList * ui = new PrivateStoreManageBuyList (adena, items);
+			if (ui->exec () == QDialog::Accepted)
+			{
+				if (ui->packet ().length ())
+				{
+					if (Data::buyWidget ()->motd ().length ())
+					{
+						write_ (GameCrypt::encrypt (GamePacket::setPrivateStoreMsgBuy (DataFunc::encodeTo (Data::buyWidget ()->motd ()))));
+					}
+					write_ (GameCrypt::encrypt (GamePacket::setPrivateStoreListBuy (ui->packet ())));
+				}
+				else
+				{
+					write_ (GameCrypt::encrypt (GamePacket::requestPrivateStoreQuitBuy ()));
+				}
+			}
+			else
+			{
+				write_ (GameCrypt::encrypt (GamePacket::requestPrivateStoreQuitBuy ()));
+			}
+		}
+		else if (packetId == E_S_GAME_PRIVATE_STORE_LIST)
+		{
+			int playerObjId;
+			int packSell;
+			int adena;
+			vector <PlayerSellItem> items;
+			GameF::privateStoreList (pck, &playerObjId, &packSell, &adena, &items);
+			PlayerStoreList * ui = new PlayerStoreList (packSell, adena, items);
+			if (ui->exec () == QDialog::Accepted)
+			{
+				write_ (GameCrypt::encrypt (GamePacket::sendPrivateStoreBuyList (playerObjId, ui->packet ())));
+			}
+			delete ui;
+		}
+		else if (packetId == E_S_GAME_PRIVATE_BUY_LIST_BUY)
+		{
+			int playerObjId;
+			int adena;
+			vector <PlayerBuyItem> items;
+			GameF::privateBuyListBuy (pck, &playerObjId, &adena, &items);
+			PlayerStoreListBuy * ui = new PlayerStoreListBuy (adena, items);
+			if (ui->exec () == QDialog::Accepted)
+			{
+				write_ (GameCrypt::encrypt (GamePacket::sendPrivateStoreBuyListBuy (playerObjId, ui->packet ())));
+			}
+			delete ui;			
+		}
+		else if (packetId == E_S_GAME_TRADE_REQUEST)
+		{
+			int senderId;
+			GameF::tradeRequest (pck, &senderId);
+			string name;
+			for (unsigned int i = 0; i < MapScene::vChar.size (); ++i)
+			{
+				if (MapScene::vChar[i].objectId () == senderId)
+				{
+					name = MapScene::vChar[i].name ();
+					break;
+				}
+			}
+			TradeRequest * ui = new TradeRequest (name);
+			if (ui->exec () == QDialog::Accepted)
+			{
+				write_ (GameCrypt::encrypt (GamePacket::answerTradeRequest (1)));
+			}
+			else
+			{
+				write_ (GameCrypt::encrypt (GamePacket::answerTradeRequest (0)));
+			}
+			delete ui;
+		}
+		else if (packetId == E_S_GAME_TRADE_START)
+		{
+			int objectId;
+			vector <TradeItem> items;
+			string name;
+			GameF::tradeStart (pck, &objectId, &items);
+			for (unsigned int i = 0; i < MapScene::vChar.size (); ++i)
+			{
+				if (MapScene::vChar[i].objectId () == objectId)
+				{
+					name = MapScene::vChar[i].name ();
+					break;
+				}
+			}
+			if (tradeUi_)
+			{
+				delete tradeUi_;
+			}
+			tradeUi_ = new Trade (name, objectId, items);
+			connect (tradeUi_, SIGNAL (sendPacket (const string &)), SLOT (slotMap (const string &)));
+			if (tradeUi_->exec () == QDialog::Rejected)
+			{
+				tradeUi_->slotCancel ();
+			}
+		}
+		else if (packetId == E_S_GAME_TRADE_OWN_ADD)
+		{
+			vector <TradeItem> items;
+			GameF::tradeOwnAdd (pck, &items);
+			tradeUi_->tradeOwnAdd (items);
+		}
+		else if (packetId == E_S_GAME_TRADE_OTHER_ADD)
+		{
+			vector <TradeItem> items;
+			GameF::tradeOwnAdd (pck, &items);
+			tradeUi_->tradeOtherAdd (items);
+		}
+		else if (packetId == E_S_GAME_TRADE_DONE)
+		{
+			if (tradeUi_)
+			{
+				tradeUi_->reject ();
+			}
+		}
+		else if (packetId == E_S_GAME_TRADE_PRESS_OWN_OK)
+		{
+			tradeUi_->tradePressOwnOk ();
+		}
+		else if (packetId == E_S_GAME_TRADE_PRESS_OTHER_OK)
+		{
+			tradeUi_->tradePressOtherOk ();
+		}
+		else if (packetId == E_S_GAME_TRADE_PRESS_OWN_OK)
+		{
+			tradeUi_->tradePressOwnOk ();
+		}
+		else if (packetId == E_S_GAME_BUY_LIST)
+		{
+			int adena;
+			int saleId;
+			vector <NpcSellItem> items;
+			GameF::buyList (pck, &adena, &saleId, &items);
+			NpcTradeSell * ui = new NpcTradeSell (adena, items);
+			if (ui->exec () == QDialog::Accepted)
+			{
+				write_ (GameCrypt::encrypt (GamePacket::requestBuyItem (saleId, ui->packet ())));
+			}
+			delete ui;
+		}
+		else if (packetId == E_S_GAME_SELL_LIST)
+		{
+			int adena;
+			int saleId;
+			vector <NpcBuyItem> items;
+			GameF::sellList (pck, &adena, &saleId, &items);
+			NpcTradeBuy * ui = new NpcTradeBuy (adena, items);
+			if (ui->exec () == QDialog::Accepted)
+			{
+				write_ (GameCrypt::encrypt (GamePacket::requestSellItem (saleId, ui->packet ())));
+			}
+			delete ui;
+		}
+		else if (packetId == E_S_GAME_WAREHOUSE_DEPOSIT_LIST)
+		{
+			int adena;
+			int whtype;
+			vector <WarehouseItem> items;
+			GameF::wareHouseDepositList (pck, &whtype, &adena, &items);
+			WarehouseDeposit * ui = new WarehouseDeposit (adena, items);
+			if (ui->exec () == QDialog::Accepted)
+			{
+				write_ (GameCrypt::encrypt (GamePacket::sendWareHouseDepositList (ui->packet ())));
+			}
+			delete ui;
+		}
+		else if (packetId == E_S_GAME_WAREHOUSE_WITHDRAW_LIST)
+		{
+			int adena;
+			int whtype;
+			vector <WarehouseItem> items;
+			GameF::wareHouseDepositList (pck, &whtype, &adena, &items);
+			WarehouseWithdraw * ui = new WarehouseWithdraw (adena, items);
+			if (ui->exec () == QDialog::Accepted)
+			{
+				write_ (GameCrypt::encrypt (GamePacket::sendWareHouseWithdrawList (ui->packet ())));
+			}
+			delete ui;			
+		}
+		else if (packetId == E_S_GAME_PRIVATE_STORE_MSG)
+		{
+			int objectId;
+			string msg;
+			GameF::privateStoreMsg (pck, &objectId, &msg);
+			if (MapScene::user.objectId () != objectId)
+			{
+				emit signalAddItem (objectId, E_INFO_SELL, msg);
+				MapScene::setAlt (objectId, msg);
+			}
+		}
+		else if (packetId == E_S_GAME_RECIPE_SHOP_MSG)
+		{
+			int objectId;
+			string msg;
+			GameF::privateStoreMsg (pck, &objectId, &msg);
+			if (MapScene::user.objectId () != objectId)
+			{
+				emit signalAddItem (objectId, E_INFO_CRAFT, msg);
+				MapScene::setAlt (objectId, msg);
+			}
+		}
+		else if (packetId == E_S_GAME_CHANGE_WAIT_TYPE)
+		{
+			int objectId;
+			int waitType;
+			CatXPoint pos;
+			GameF::changeWaitType (pck, &objectId, &waitType, &pos);
+			if (objectId == MapScene::user.objectId ())
+			{
+				if (waitType == 0)
+				{
+					MapScene::setWaitType (0);
+					write_ (GameCrypt::encrypt (GamePacket::requestActionUse (0)));
+				}
+				else
+				{
+					MapScene::setWaitType (1);
+				}
+			}
+			else
+			{
+				emit signalDeleteItem (objectId, E_INFO_SELL);
+				emit signalDeleteItem (objectId, E_INFO_BUY);
+				emit signalDeleteItem (objectId, E_INFO_CRAFT);
+				MapScene::setAlt (objectId, "");
+			}
+		}
+		else if (packetId == E_S_GAME_RECIPE_SHOP_MANAGE_LIST)
+		{
+			int objectId;
+			int adena;
+			int isDwarfen;
+			vector <DwarfenManufactureItem> recipe;
+			vector <DwarfenManufactureItem> list;
+			GameF::recipeShopManageList (pck, &objectId, &adena, &isDwarfen, &recipe, &list);
+			DwarfenManufacture * ui = new DwarfenManufacture (recipe, list);
+			if (ui->exec () == QDialog::Accepted)
+			{
+				if (ui->message ().length ())
+				{
+					write_ (GameCrypt::encrypt (GamePacket::requestRecipeShopMessageSet (DataFunc::encodeTo (ui->message ()))));
+				}
+				write_ (GameCrypt::encrypt (GamePacket::requestRecipeShopListSet (ui->packet ())));
+			}
+			delete ui;
+		}
+		else if (packetId == E_S_GAME_SAY2)
+		{
+			int objectId;
+			int type;
+			string player;
+			string msg;
+			GameF::say2 (pck, &objectId, &type, &player, &msg);
+			player = DataFunc::encodeFrom (player);
+			msg = DataFunc::encodeFrom (msg);
+			emit signalSay2 (DataFunc::intToString (type) + player + static_cast <char> (0) + msg);
+		}
+		else if (packetId == E_S_GAME_SYSTEM_MESSAGE)
+		{
+			int msgId;
+			vector <SystemItem> items;
+			GameF::systemMessage (pck, &msgId, &items);
+			emit signalSystemMessage (Data::buildSystemMessage (msgId, items));
+		}
+		else if (packetId == E_S_GAME_GM_HIDE)
+		{
+			int id;
+			GameF::gmHide (pck, &id);
+			write_ (GameCrypt::encrypt (GamePacket::appearing ()));
+		}
+		else if (packetId == E_S_GAME_ITEM_LIST_PACKET)
+		{
+			int window;
+			vector <InventoryItem> items;
+			GameF::itemListPacket (pck, &window, &items);
+			emit signalItemList (items);
+		}
+		else if (packetId == E_S_GAME_INVENTORY_UPDATE)
+		{
+			vector <InventoryItem> items;
+			GameF::inventoryUpdate (pck, &items);
+			emit signalItemList (items);
+		}
+		else if (packetId == E_S_GAME_TELEPORT_TO_LOCATION)
+		{
+			int objectId;
+			CatXPoint pos;
+			GameF::teleportToLocation (pck, &objectId, &pos);
+			MapScene::teleportToLocation (objectId, pos);
+			teleportTimer_->start (5000);
+		}
+		else if (packetId == E_S_GAME_RESTART_RESPONSE)
+		{
+			int ok;
+			string msg;
+			GameF::restartResponse (pck, &ok, &msg);
+			if (ok)
+			{
+				emit signalDeleteObject (MapScene::user.objectId ());
+				enterWorld_ = false;
+				emit enterWorld (false);
+			}
+		}
+		else if (packetId == E_S_GAME_LOGOUT_OK)
+		{
+			for (unsigned int i = 0; i < MapScene::vChar.size (); ++i)
+			{
+				emit signalDeleteObject (MapScene::vChar[0].objectId ());				
+			}
+			for (unsigned int i = 0; i < MapScene::vNpc.size (); ++i)
+			{
+				emit signalDeleteObject (MapScene::vNpc[0].objectId ());				
+			}
+			emit signalDeleteObject (MapScene::user.objectId ());
+			enterWorld_ = false;
+			emit enterWorld (false);
+			pSocket_->close ();
+		}
+		else if (packetId == E_S_GAME_CHAR_TEMPLATES)
+		{
+			vector <CharTemplate> chars;
+			GameF::charTemplates (pck, &chars);
+			NewChar * di = new NewChar (chars);
+			if (di->exec () == QDialog::Accepted)
+			{
+				for (unsigned int i = 0; i < chars.size (); ++i)
+				{
+					if (chars[i].classId == di->classId ())
+					{
+						write_ (GameCrypt::encrypt (GamePacket::charCreate (DataFunc::encodeTo (di->name ()), di->sex (), chars[i], di->style (), di->hair (), di->face ())));
+						break;
+					}
+				}
+				delete di;
+			}
+			else
+			{
+				delete di;
+				pck = saveGameCharSelect_;
+				vector <CharSelectItem> chars;
+				GameF::charSelect (pck, &chars);
+				saveGameCharSelect_ = pck;
+				SelectCharDialog * ui = new SelectCharDialog (chars);
+				int selection = 0;
+				if (ui->exec () == QDialog::Accepted)
+				{
+					selection = ui->selection ();
+					delete ui;
+				}
+				else
+				{
+					pSocket_->close ();
+					delete ui;
+					return;
+				}
+				if (selection == -1)
+				{
+					write_ (GameCrypt::encrypt (GamePacket::newCharacter ()));
+				}
+				else
+				{
+					write_ (GameCrypt::encrypt (GamePacket::charSelected (selection)));
+				}
+			}
+		}
+		else if (packetId == E_S_GAME_CHAR_CREATE_FAIL)
+		{
+			ErrorDialog * nya = new ErrorDialog ("Char with this name exists");
+			nya->exec ();
+			delete nya;
+			pck = saveGameCharSelect_;
+			vector <CharSelectItem> chars;
+			GameF::charSelect (pck, &chars);
+			saveGameCharSelect_ = pck;
+			SelectCharDialog * ui = new SelectCharDialog (chars);
+			int selection = 0;
+			if (ui->exec () == QDialog::Accepted)
+			{
+				selection = ui->selection ();
+				delete ui;
+			}
+			else
+			{
+				pSocket_->close ();
+				delete ui;
+				return;
+			}
+			if (selection == -1)
+			{
+				write_ (GameCrypt::encrypt (GamePacket::newCharacter ()));
+			}
+			else
+			{
+				write_ (GameCrypt::encrypt (GamePacket::charSelected (selection)));
+			}
+		}
+		else if (packetId == E_S_GAME_RECIPE_SHOP_SELL_LIST)
+		{
+			vector <RecipeShopItem> items;
+			int objectId;
+			int mp;
+			int maxMp;
+			int adena;
+			GameF::recipeShopSellList (pck, &objectId, &mp, &maxMp, &adena, &items);
+			RecipeShopSellList * ui = new RecipeShopSellList (mp, maxMp, adena, items);
+			if (ui->exec () == QDialog::Accepted)
+			{
+				write_ (GameCrypt::encrypt (GamePacket::requestRecipeShopMakeInfo (objectId, items [ui->rowId ()].recipeId)));
+			}
+			delete ui;
+		}
+		else if (packetId == E_S_GAME_RECIPE_SHOP_ITEM_INFO)
+		{
+			int shopId;
+			int recipeId;
+			int mp;
+			int maxMp;
+			GameF::recipeShopItemInfo (pck, &shopId, &recipeId, &mp, &maxMp);
+			RecipeShopItemInfo * ui = new RecipeShopItemInfo (recipeId, mp, maxMp);
+			if (ui->exec () == QDialog::Accepted)
+			{
+				if (ui->selection () == 0)
+				{
+					//craft 
+					delete ui;
+					write_ (GameCrypt::encrypt (GamePacket::requestRecipeShopMakeItem (shopId, recipeId)));
+				}
+				else if (ui->selection () == 1)
+				{
+					// prev
+					delete ui;
+					write_ (GameCrypt::encrypt (GamePacket::requestRecipeShopPrev (shopId)));
+				}
+			}
+			else
+			{
+				delete ui;
+			}
+		}
+		else if (packetId == E_S_GAME_SOCIAL_ACTION)
+		{
+		}
+		else if (packetId == E_S_GAME_FINISH_ROTATING)
+		{
+		}
+		else
+		{
+			Debug::write (pck);
+		}
+		slotReadyRead_ ();		
+	}
+}
 
-def take_screenshot(x1, y1, x2, y2, filename):
-    """
-    Делает скриншот заданной области экрана и сохраняет его в файл.
+void GameThread::slotConnected_ ()
+{
+	bSize_ = 0;
+	init_ = false;
+	enterWorld_ = false;
+	write_ (GamePacket::protocolVersion (REVISION));
+}
 
-    Args:
-        x1 (int): X-координата левого верхнего угла.
-        y1 (int): Y-координата левого верхнего угла.
-        x2 (int): X-координата правого нижнего угла.
-        y2 (int): Y-координата правого нижнего угла.
-        filename (str): Имя файла для сохранения скриншота.
+void GameThread::write_ (const string & str) const
+{
+	string pck;
+	unsigned int len = str.length () + 2;
+	pck += len % 0x100;
+	pck += len / 0x100;
+	pck += str;
+	pSocket_->write (pck.c_str (), pck.length ());
+}
 
-    Returns:
-        str: Имя файла, в который был сохранен скриншот.
-    """
-    screenshot = pyautogui.screenshot(region=(x1, y1, x2 - x1, y2 - y1))
-    screenshot.save(filename)
-    return filename
+void GameThread::slotEnterWorld_ ()
+{
+	write_ (GameCrypt::encrypt (GamePacket::enterWorld ()));
+	write_ (GameCrypt::encrypt (GamePacket::requestItemList ()));
+	enterWorld_ = true;
+	emit enterWorld (true);
+}
 
-def recognize_sum():
-    """
-     Распознает число (цену) на скриншоте с помощью Tesseract OCR.
+void GameThread::slotMap (const string & pck)
+{
+	if (enterWorld_)
+	{
+			write_ (GameCrypt::encrypt (pck));
+	}
+}
 
-     Returns:
-         int: Распознанная сумма или 0 при ошибке.
-     """
-    try:
-        image = Image.open('price.png')
-        image = image.resize((328, 62)) # Изменение размера изображения
-        path_to_tesseract = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-        pytesseract.tesseract_cmd = path_to_tesseract
-        text = pytesseract.image_to_string(image, config='digit', lang='rus') # Распознаем текст из картинки с параметрами digit и rus
-        text = text.replace('мпн', 'млн') #  Заменяем мпн на млн
-        text = text.replace('мл', 'млн') # Заменяем мл на млн
-        mln = 0
-        if 'млн' in text: # Если в строке есть млн
-            mln = text.split(' млн')[0] # Забираем значение до млн
-            if ' ' in mln:
-                mln = text.split(' ')[1] # Забираем значение после пробела
-        tsh = 0
-        if 'тыс' in text: # Если есть тыс
-            tsh = text.split(' тыс')[0] # Забираем значение до тыс
-            if ' ' in tsh:
-                tsh = tsh.split(' ') # Если есть пробел
-                n = tsh.__len__()
-                tsh = tsh[n - 1] # Забираем значение после пробела
-        eden = 0
-        if 'аден' in text:  # Если есть аден
-            eden = text.split(' аден')[0]  # Забираем значение до аден
-            if ' ' in eden:
-                eden = eden.split(' ') # Если есть пробел
-                n = eden.__len__()
-                eden = eden[n - 1] # Забираем значение после пробела
-        mln = int(1) * 1000000  # млн всегда 1
-        tsh = int(tsh) * 1000 if tsh else 0  # Если нет тыс, то 0, если есть то множим на 1000
-        if eden == 'тыс' or eden == 'млн' :
-             eden = 0 # Если eden это тыс, или млн, то это 0
-        else:
-            eden = int(eden) if eden else 0  # Если есть значение, то забираем, если нет то 0
-        rez = str(mln + tsh + eden) # Складываем полученное значение
-        return int(rez)
-    except Exception as e:
-        print(f"Ошибка распознавания текста: {e}")
-        return 0
+void GameThread::slotSell_ (bool)
+{
+	write_ (GameCrypt::encrypt (GamePacket::requestPrivateStoreManage ()));
+}
 
-def recognize_sum_balance(image):
-    """
-    Распознает баланс на скриншоте с помощью Tesseract OCR.
+void GameThread::slotBuy_ (bool)
+{
+	write_ (GameCrypt::encrypt (GamePacket::requestPrivateStoreManageBuy ()));
+}
 
-    Args:
-        image (PIL.Image.Image): Изображение для распознавания.
+void GameThread::slotDwarfenManufacture_ (bool)
+{
+	write_ (GameCrypt::encrypt (GamePacket::requestActionUse (E_ACTION_DWARFEN_MANUFACTURE)));
+}
 
-    Returns:
-        int: Распознанный баланс или 0 при ошибке.
-    """
-    try:
-        image = image.resize((328, 62))
-        text = pytesseract.image_to_string(image, config='digit', lang='rus') # Пытаемся распознать текст как одно слово.
-        text = ''.join(re.findall(r'\d', text)) # Убираем все кроме цифр
-        return int(text) if text else 0
-    except Exception as e:
-        print(f"Ошибка распознавания текста: {e}")
-        return 0
+void GameThread::slotSay2 (const string & msg, const int type, const string & pm)
+{
+	if (enterWorld_)
+	{
+		if (msg.substr (0, 2) == "//")
+		{
+			write_ (GameCrypt::encrypt (GamePacket::sendBypassBuildCmd (DataFunc::encodeTo (msg.substr (2, msg.length ())))));
+		}
+		else
+		{
+			if (pm.length ())
+			{
+				write_ (GameCrypt::encrypt (GamePacket::say2 (DataFunc::encodeTo (msg), type, DataFunc::encodeTo (pm))));
+			}
+			else
+			{
+				write_ (GameCrypt::encrypt (GamePacket::say2 (DataFunc::encodeTo (msg), type)));
+			}
+		}
+	}
+}
 
+void GameThread::slotTeleportTimer ()
+{
+	teleportTimer_->stop ();
+	write_ (GameCrypt::encrypt (GamePacket::appearing ()));
+}
 
-def recognize_balance(image):
-    """
-       Распознает баланс на скриншоте с помощью Tesseract OCR.
+void GameThread::slotRestart (bool)
+{
+	write_ (GameCrypt::encrypt (GamePacket::requestRestart ()));
+}
 
-       Args:
-           image (PIL.Image.Image): Изображение для распознавания.
+void GameThread::slotLogout (bool)
+{
+	write_ (GameCrypt::encrypt (GamePacket::requestLogout ()));
+}
 
-       Returns:
-           int: Распознанный баланс или 0 при ошибке.
-       """
-    try:
-        image = image.resize((328, 62))
-        text = pytesseract.image_to_string(image, config='--psm 6 --oem 3', lang='rus')
-        text = ''.join(re.findall(r'\d', text))
-        return int(text) if text else 0
-    except Exception as e:
-        print(f"Ошибка распознавания текста: {e}")
-        return 0
-
-
-def click(x, y):
-    """
-    Выполняет одиночный клик мышью по заданным координатам.
-
-    Args:
-        x (int): X-координата клика.
-        y (int): Y-координата клика.
-    """
-    pyautogui.moveTo(x, y, duration=0.1)
-    time.sleep(delay_before_click)
-    pyautogui.mouseDown()
-    time.sleep(delay_mouse)
-    pyautogui.mouseUp()
-    time.sleep(delay_after_click)
-
-
-def double_click(x, y):
-    """
-    Выполняет двойной клик мышью по заданным координатам.
-
-    Args:
-        x (int): X-координата клика.
-        y (int): Y-координата клика.
-    """
-    pyautogui.moveTo(x, y, duration=0.1)
-    time.sleep(delay_before_click)
-    pyautogui.mouseDown(button='left')
-    time.sleep(delay_mouse)
-    pyautogui.mouseUp(button='left')
-    time.sleep(delay_mouse)
-    pyautogui.mouseDown(button='left')
-    time.sleep(delay_mouse)
-    pyautogui.mouseUp(button='left')
-    time.sleep(delay_after_click)
-
-
-def type_text(text):
-    """
-    Вводит текст с клавиатуры.
-
-    Args:
-        text (str): Текст для ввода.
-    """
-    pyautogui.write(str(text))
-    time.sleep(delay_before_click)
-
-
-def check_balance_and_notify(added_sum):
-    """
-    Проверяет, достаточно ли прибыль и при необходимости отправляет уведомление в Telegram.
-
-    Returns:
-        bool: True если прибыль недостаточна, и нужно отправлять уведомление, False если достаточно.
-    """
-    try:
-        screenshot4_path = take_screenshot(screen_balance[0], screen_balance[1], screen_balance[2], screen_balance[3],
-                                           "balance.png")
-        sum2 = recognize_sum_balance(Image.open(screenshot4_path))
-        print(f"Остаток адены: {sum2}")
-        if sum2 > 150000000000:
-            try:
-                send_telegram_message(
-                    f"🔥🔥🔥ВСЕ ПРОДАЛОСЬ🔥🔥🔥")
-                time.sleep(3)
-                send_telegram_message(
-                    f"🔥🔥🔥ПОСЛЕДНЯЯ ЦЕНА: {added_sum}🔥🔥🔥")
-                return True  # Возвращаем True, так как условие выполнилось
-            except Exception as e:
-                print(f"Ошибка при отправке уведомления о sum2: {e}")
-        return False  # Возвращаем False, так как условие не выполнилось
-    except Exception as e:
-        print(f"Ошибка при выполнении проверки sum2: {e}")
-        return False
-
-
-def load_stop_sum():
-    """ Запрашивает у пользователя значение stop_sum через консоль. """
-    global stop_sum
-    while True:
-        print(f"//------------------------------МЫ НАЧАЛИ СО 156 МЛРД------------------------------//")
-        stop_sum_input = input("Введите значение stop_sum: ")
-        if stop_sum_input.strip() == "":
-          print("Значение stop_sum не может быть пустым. Пожалуйста, введите значение.")
-          continue
-        try:
-            stop_sum = int(stop_sum_input)
-            print(f"Используется значение stop_sum: {stop_sum}")
-            break
-        except ValueError:
-            print("Некорректный ввод. Пожалуйста, введите целое число.")
-
-
-def send_telegram_message(message):
-    """
-    Отправляет сообщение в Telegram.
-
-    Args:
-        message (str): Текст сообщения.
-    """
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    params = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message
-    }
-    try:
-        response = requests.get(url, params=params)
-        response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
-        print(f"Telegram message sent successfully! Response code: {response.status_code}")
-    except requests.exceptions.RequestException as e:
-        print(f"Error sending Telegram message: {e}")
-
-def load_wait_duration(answer):
-    """ Запрашивает у пользователя значение wait_duration через консоль. """
-    while True:
-        try:
-            if int(answer) == 1:
-                pizdec = 70
-                print(f"Используется фиксированная задержка: {pizdec} сек")
-                return pizdec
-            elif int(answer) == 2:
-                pizdec = random.randint(70, 180)
-                print(f"Используется случайная задержка: {pizdec} сек")
-                return pizdec
-            else:
-                print("Некорректный ввод. Пожалуйста, введите 1 или 2.")
-        except ValueError:
-            print("Некорректный ввод. Пожалуйста, введите целое число.")
-
-def compare_screenshots(img1, img2, tolerance):
-    """
-     Сравнивает два изображения на схожесть.
-
-    Args:
-        img1 (PIL.Image.Image): Первое изображение.
-        img2 (PIL.Image.Image): Второе изображение.
-        tolerance (int): Допустимое различие между пикселями.
-
-    Returns:
-         bool: True, если изображения схожи, иначе False.
-     """
-    try:
-        img1_array = np.array(img1) # Конвертируем в массив
-        img2_array = np.array(img2) # Конвертируем в массив
-        if img1_array.shape != img2_array.shape: # Если размерности разные
-            return False
-        diff = np.abs(img1_array.astype(int) - img2_array.astype(int)) # Вычитаем массивы
-        return np.max(diff) <= tolerance # Проверяем на максимальную погрешность
-    except Exception as e:
-        print(f"Ошибка при сравнении скриншотов: {e}")
-        return False
-
-
-def process_actions():
-    """
-      Основной цикл автоматизации действий в игре.
-      Выполняет клики, распознавание текста, сравнение изображений, и отправляет уведомления.
-    """
-    global stop_sum, first_screenshot, stop_event # Указываем, что используется глобальная переменная
-    step = 0 # Задаем начальное значение шага
-    first_screenshot_taken = False # Указываем, что первый скриншот еще не сделан
-    first_screenshot = None
-    added_sum = 0
-    sum1 = 0  # инициализируем sum1
-    screenshot5_path = take_screenshot(screen_price[0], screen_price[1], screen_price[2],
-                                               screen_price[3],
-                                               "price_enemy.png")  # Создаем скриншот цены конкурента
-    Image.open(screenshot5_path).save('price.png') # Сохраняем скриншот
-    sum16 = recognize_sum()  # Распознаем сумму
-    added_sum = sum16
-    while not stop_event.is_set():
-        if not first_screenshot_taken:
-            try:
-                screenshot1_path = take_screenshot(screen_nickname[0], screen_nickname[1], screen_nickname[2],
-                                                   screen_nickname[3],
-                                                   "nickname.png") # Создаем скриншот ника и сохраняем
-                first_screenshot = Image.open(screenshot1_path)  # Открываем скриншот
-                first_screenshot_taken = True # Указываем, что первый скриншот был сделан
-            except Exception as e:
-                print(f"Ошибка при загрузке first_screenshot: {e}")
-                break
-
-        if step == 0:
-            step += 1  # Увеличиваем шаг на 1
-            time.sleep(0.1) # Короткая задержка
-        elif step == 1:
-            # 2-7 Пункты.
-            if check_balance_and_notify(added_sum):  # если баланс мал, то завершаем работу
-                break  # Выходим из цикла
-            click(click_update[0], click_update[1]) # Кликаем на "Обновить"
-            time.sleep(1) # Ожидание 1 сек
-            click(click_column[0], click_column[1])  # Кликаем на колонку
-            time.sleep(0.4)  # Ожидание 0.4 сек
-            click(click_column[0], click_column[1])  # Кликаем на колонку еще раз
-            time.sleep(0.4)  # Ожидание 0.4 сек
-            step += 1 # Увеличиваем шаг на 1
-            time.sleep(0.1) # Короткая задержка
-        elif step == 2:
-            # 8. скрин и сравнение.
-            screenshot2_path = take_screenshot(screen_nickname[0],
-                                               screen_nickname[1],
-                                               screen_nickname[2],
-                                               screen_nickname[3],
-                                               "nickname.png") # Создаем скриншот ника
-            try:
-                img2 = Image.open(screenshot2_path) # Открываем скриншот ника
-                if compare_screenshots(first_screenshot, img2, tolerance): # Если ники не отличаются, то пропускаем и идем в конец
-                    step = 7 # Указываем шаг 7
-                    continue  # Проверка на большую разницу с ценой конкурента
-            except Exception as e:
-                print(f"Ошибка при сравнении скриншотов: {e}")
-            step += 1 # Увеличиваем шаг на 1
-            time.sleep(0.1)  # Короткая задержка
-        elif step == 3:
-            screenshot3_path = take_screenshot(screen_price[0], screen_price[1], screen_price[2],
-                                               screen_price[3],
-                                               "cenapricecurenta.png")  # Создаем скриншот цены
-            Image.open(screenshot3_path).save('price.png')  # Сохраняем скриншот
-            sum1 = recognize_sum()  # Считываем сумму
-            print(f"Первая цена: {sum1}")
-
-            added_sum = sum1 - random.choice([1, 2, 5, 10, 20])  # Уменьшаем цену на случайное значение
-            print(f"Вводимая цена: {added_sum}")
-            if added_sum <= stop_sum:  # Если цена ниже стоп-суммы
-                print("Цена выше порога.")
-                try:
-                    send_telegram_message(
-                        f"❌❌НИЖЕ ГРАНИЦЫ❌❌")  # Отправляем сообщение в телеграм
-                    time.sleep(2)
-                    send_telegram_message(
-                        f"❌❌НИЖЕ ГРАНИЦЫ❌❌")  # Отправляем сообщение в телеграм
-                    time.sleep(2)
-                except Exception as e:
-                    print(f"Ошибка при отправке сообщения Telegram: {e}")
-                wait_time = 0
-                pizdec = int(load_wait_duration(answer))
-                while wait_time < pizdec and not stop_event.is_set():  # check if stop
-                     time.sleep(1)
-                     wait_time += 1
-                if stop_event.is_set():
-                    break
-                step = 0  # Сбрасываем шаг до 0
-                continue
-            print("Фиксим.")
-            # Вторая ветка
-            click(click_redact[0], click_redact[1]) # Кликаем на редактировать
-            time.sleep(2) # Ожидание 2 сек
-            double_click(dclick_coin[0], dclick_coin[1])  # Двойной клик по монете
-            time.sleep(1.5) # Ожидание 1.5 сек
-            click(click_all[0], click_all[1]) # Кликаем на "Все"
-            time.sleep(0.8) # Ожидание 0.8 сек
-            pyautogui.press('enter') # Нажимаем ентер
-            time.sleep(0.8)  # Ожидание 0.8 сек
-            double_click(dclick_mycoin[0], dclick_mycoin[1]) # Двойной клик по моему товару
-            time.sleep(1) # Ожидание 1 сек
-            step += 1 # Увеличиваем шаг на 1
-            time.sleep(0.1) # Короткая задержка
-        elif step == 4:
-            type_text(added_sum) # Печатаем цену
-            time.sleep(0.5) # Ожидание 0.5 сек
-            pyautogui.press('enter') # Нажимаем ентер
-            step += 1  # Увеличиваем шаг на 1
-            time.sleep(0.1) # Короткая задержка
-            click(click_all[0], click_all[1]) # Кликаем на "Все"
-            time.sleep(0.8) # Ожидание 0.8 сек
-            pyautogui.press('enter')  # Нажимаем ентер
-            time.sleep(1.5) # Ожидание 1.5 сек
-            step += 1 # Увеличиваем шаг на 1
-            time.sleep(0.1) # Короткая задержка
-        elif step == 6:
-            # Пункт 15
-            click(click_start_sell[0], click_start_sell[1]) # Кликаем на "Начать продажу"
-            wait_time = 0
-            pizdec = int(load_wait_duration(answer))
-            while wait_time < pizdec and not stop_event.is_set():  # check if stop
-                time.sleep(1)
-                wait_time += 1
-            if stop_event.is_set():
-                 break
-            step = 0 # Сбрасываем шаг до 0
-            continue # Идем в начало
-        elif step == 7:
-            # Если большая разница в цене с конкурентом
-            screenshot4_path = take_screenshot(screen_enemy[0], screen_enemy[1], screen_enemy[2],
-                                               screen_enemy[3],
-                                               "price_nick.png")  # Создаем скриншот ника продавца
-            Image.open(screenshot4_path).save('price.png')  # Сохраняем скриншот
-            sum12 = recognize_sum() # Распознаем сумму
-            screenshot5_path = take_screenshot(screen_price[0], screen_price[1], screen_price[2],
-                                               screen_price[3],
-                                               "price_enemy.png")  # Создаем скриншот цены конкурента
-            Image.open(screenshot5_path).save('price.png') # Сохраняем скриншот
-            sum11 = recognize_sum()  # Распознаем сумму
-            print(f"Моя цена: {sum11}")
-            print(f"Цена за мной: {sum12}")
-
-            if (sum12 - sum11) > 40: # Если разница между нашими ценами и конкурентами > 40
-                added_sum = sum12 - random.choice([1, 2, 5, 10, 20]) # Уменьшаем цену на рандомное значение
-                if added_sum <= stop_sum: # Если сумма ниже стоп суммы
-                    print("Сумма достигла предела, скрипт завершен.")
-                    try:
-                        send_telegram_message(
-                            f"❌❌НИЖЕ ГРАНИЦЫ❌❌") # Отправляем сообщение в телеграм
-                        time.sleep(2)
-                        send_telegram_message(
-                            f"❌❌НИЖЕ ГРАНИЦЫ❌❌")  # Отправляем сообщение в телеграм
-                        time.sleep(2)
-                    except Exception as e:
-                        print(f"Ошибка при отправке сообщения Telegram: {e}")
-                    wait_time = 0
-                    pizdec = int(load_wait_duration(answer))
-                    while wait_time < pizdec and not stop_event.is_set():  # check if stop
-                         time.sleep(1)
-                         wait_time += 1
-                    if stop_event.is_set():
-                        break
-                    step = 0  # Сбрасываем шаг до 0
-                    continue # Идем в начало
-                print("Корректирую разницу с конкурентом")
-                # Вторая ветка
-                click(click_redact[0], click_redact[1]) # Кликаем на редактировать
-                time.sleep(2) # Ждем 2 сек
-                double_click(dclick_coin[0], dclick_coin[1]) # Двойной клик на монету
-                time.sleep(1.5) # Ждем 1.5 сек
-                click(click_all[0], click_all[1])  # Кликаем на "Все"
-                time.sleep(0.8) # Ждем 0.8 сек
-                pyautogui.press('enter')  # Нажимаем ентер
-                time.sleep(0.8) # Ждем 0.8 сек
-                double_click(dclick_mycoin[0], dclick_mycoin[1])  # Двойной клик на мой товар
-                time.sleep(1)  # Ждем 1 сек
-                time.sleep(0.1) # Короткая задержка
-                # Пункты 6-10
-                type_text(added_sum) # Печатаем цену
-                time.sleep(0.5)  # Ждем 0.5 сек
-                pyautogui.press('enter') # Нажимаем ентер
-                time.sleep(0.1) # Короткая задержка
-                click(click_all[0], click_all[1]) # Кликаем на "Все"
-                time.sleep(0.8) # Ждем 0.8 сек
-                pyautogui.press('enter') # Нажимаем ентер
-                time.sleep(1.5)  # Ждем 1.5 сек
-                # Пункт 15
-                click(click_start_sell[0], click_start_sell[1]) # Кликаем на "Начать продажу"
-                print("Ожидание 70 секунд...")
-                wait_time = 0
-                pizdec = int(load_wait_duration(answer))
-                while wait_time < pizdec and not stop_event.is_set():  # check if stop
-                    time.sleep(1)
-                    wait_time += 1
-                if stop_event.is_set():
-                    break
-                step = 0  # Сбрасываем шаг до 0
-                continue # Идем в начало
-            else:
-                print("Все ок.")
-                added_sum = sum11
-                wait_time = 0
-                pizdec = int(load_wait_duration(answer))
-                while wait_time < pizdec and not stop_event.is_set():  # check if stop
-                   time.sleep(1)
-                   wait_time += 1
-                if stop_event.is_set():
-                   break
-                step = 0 # Сбрасываем шаг до 0
-                continue # Идем в начало
-
-
-def start_script():
-    """
-     Запускает основной цикл автоматизации.
-     Также запускает поток для проверки баланса и отправки уведомления(закоментировано).
-    """
-    global stop_event
-    stop_event.clear()  # Сбрасываем флаг остановки перед запуском
-    process_actions()
-    print("///------------------------------------PAUSE------------------------------------///")   # Сообщение о паузе
-
-
-if __name__ == "__main__":
-    root = tk.Tk()
-    root.withdraw()  # Сворачиваем окно при запуске
-    try:
-        while True:
-            load_stop_sum()  # Загружаем значение стоп суммы
-            answer = input("Введите 1 для фиксированной задержки (70 сек)\nВведите 2 для случайной задержки (70-180 сек)\n ")
-            keyboard.add_hotkey('f9', lambda: stop_event.set())
-            keyboard.wait('f10')  # ожидаем нажатие f10
-            start_script() # Запускаем скрипт
-    except KeyboardInterrupt:
-        print("\nСкрипт остановлен пользователем (Ctrl+C).")
-    except Exception as e:
-        print(f"Ошибка: {e}") # Выводим ошибку
-    finally:
-        keyboard.unhook_all_hotkeys()
-
-    root.mainloop() # Запускаем GUI
